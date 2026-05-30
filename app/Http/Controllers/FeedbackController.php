@@ -9,6 +9,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 
 class FeedbackController extends Controller
 {
@@ -18,18 +19,102 @@ class FeedbackController extends Controller
     public function categories(Request $request): JsonResponse
     {
         $role = $request->query('role', 'any');
+        $includeInactive = filter_var($request->query('include_inactive', false), FILTER_VALIDATE_BOOLEAN);
 
-        $categories = FeedbackCategory::where('is_active', true)
-            ->where(function ($q) use ($role) {
-                $q->where('sender_role', $role)
-                  ->orWhere('sender_role', 'any');
+        $categories = FeedbackCategory::query()
+            ->when(!$includeInactive, fn($q) => $q->where('is_active', true))
+            ->when(!in_array($role, ['all', 'admin'], true), function ($q) use ($role) {
+                $q->where(function ($inner) use ($role) {
+                    $inner->where('sender_role', $role)
+                        ->orWhere('sender_role', 'any');
+                });
             })
-            ->get(['id', 'name', 'slug', 'routes_to', 'sender_role', 'description']);
+            ->orderBy('name')
+            ->get(['id', 'name', 'slug', 'routes_to', 'sender_role', 'description', 'is_active']);
 
         return response()->json([
             'success'    => true,
             'categories' => $categories,
         ]);
+    }
+
+    public function storeCategory(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => ['required', 'string', 'max:100'],
+            'slug' => ['nullable', 'string', 'max:100'],
+            'routes_to' => ['required', 'in:hod,dean,rector,admin'],
+            'sender_role' => ['required', 'in:student,lecturer,any'],
+            'description' => ['nullable', 'string', 'max:1000'],
+            'is_active' => ['sometimes', 'boolean'],
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        $slug = Str::slug($request->slug ?: $request->name);
+        if (FeedbackCategory::where('slug', $slug)->exists()) {
+            $slug .= '-' . Str::lower(Str::random(4));
+        }
+
+        $category = FeedbackCategory::create([
+            'name' => $request->name,
+            'slug' => $slug,
+            'routes_to' => $request->routes_to,
+            'sender_role' => $request->sender_role,
+            'description' => $request->description,
+            'is_active' => $request->boolean('is_active', true),
+        ]);
+
+        return response()->json(['success' => true, 'category' => $category], 201);
+    }
+
+    public function updateCategory(Request $request, int $id): JsonResponse
+    {
+        $category = FeedbackCategory::findOrFail($id);
+        $validator = Validator::make($request->all(), [
+            'name' => ['sometimes', 'required', 'string', 'max:100'],
+            'slug' => ['nullable', 'string', 'max:100'],
+            'routes_to' => ['sometimes', 'required', 'in:hod,dean,rector,admin'],
+            'sender_role' => ['sometimes', 'required', 'in:student,lecturer,any'],
+            'description' => ['nullable', 'string', 'max:1000'],
+            'is_active' => ['sometimes', 'boolean'],
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        if ($request->filled('slug') || $request->filled('name')) {
+            $slug = Str::slug($request->slug ?: $request->name ?: $category->name);
+            if (FeedbackCategory::where('slug', $slug)->where('id', '!=', $category->id)->exists()) {
+                $slug .= '-' . Str::lower(Str::random(4));
+            }
+            $category->slug = $slug;
+        }
+
+        $category->fill($request->only(['name', 'routes_to', 'sender_role', 'description']));
+        if ($request->has('is_active')) {
+            $category->is_active = (bool) $request->is_active;
+        }
+        $category->save();
+
+        return response()->json(['success' => true, 'category' => $category]);
+    }
+
+    public function deleteCategory(int $id): JsonResponse
+    {
+        $category = FeedbackCategory::findOrFail($id);
+        if ($category->feedbacks()->exists()) {
+            $category->update(['is_active' => false]);
+            return response()->json([
+                'success' => true,
+                'message' => 'Category has feedback history, so it was deactivated instead of deleted.',
+            ]);
+        }
+        $category->delete();
+        return response()->json(['success' => true, 'message' => 'Category deleted successfully.']);
     }
 
 
@@ -306,6 +391,19 @@ public function deanList(Request $request): JsonResponse
     public function resolve(Request $request, int $id): JsonResponse
     {
         $feedback = Feedback::findOrFail($id);
+        $resolution = trim((string) $request->input('resolution', ''));
+
+        if ($resolution !== '') {
+            $iv = bin2hex(random_bytes(8));
+            $feedback->responses()->create([
+                'responder_role'          => $request->input('responder_role', 'admin'),
+                'responder_department_id' => null,
+                'encrypted_response'      => $this->encryptContent($resolution, $iv),
+                'encryption_iv'           => $iv,
+                'is_escalation_note'      => false,
+                'responded_at'            => now(),
+            ]);
+        }
 
         $feedback->update([
             'status'      => 'resolved',
@@ -315,6 +413,57 @@ public function deanList(Request $request): JsonResponse
         return response()->json([
             'success' => true,
             'message' => 'Feedback marked as resolved.',
+        ]);
+    }
+
+    public function suggestResolutions(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'content' => ['required', 'string', 'min:10', 'max:5000'],
+            'category_id' => ['nullable', 'integer', 'exists:feedback_categories,id'],
+            'limit' => ['nullable', 'integer', 'min:1', 'max:5'],
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        $keywords = $this->extractKeywords($request->content);
+        $limit = (int) ($request->input('limit', 3));
+
+        $resolved = Feedback::with(['category', 'responses'])
+            ->where('status', 'resolved')
+            ->when($request->filled('category_id'), fn($q) => $q->where('category_id', (int) $request->category_id))
+            ->orderByDesc('resolved_at')
+            ->limit(150)
+            ->get();
+
+        $suggestions = $resolved->map(function (Feedback $feedback) use ($keywords) {
+            $content = $this->decryptContent($feedback->encrypted_content, $feedback->encryption_iv);
+            $score = $this->keywordSimilarity($keywords, $this->extractKeywords($content));
+            $latestResponse = $feedback->responses->sortByDesc('responded_at')->first();
+            $resolution = $latestResponse
+                ? $this->decryptContent($latestResponse->encrypted_response, $latestResponse->encryption_iv)
+                : null;
+
+            return [
+                'feedback_id' => $feedback->id,
+                'tracking_code' => $feedback->tracking_code,
+                'category' => $feedback->category?->name,
+                'similarity_score' => round($score, 3),
+                'issue_preview' => Str::limit($content, 180),
+                'resolution' => $resolution ? Str::limit($resolution, 180) : 'Marked resolved without a detailed note.',
+                'resolved_at' => $feedback->resolved_at,
+            ];
+        })
+        ->filter(fn($item) => $item['similarity_score'] > 0)
+        ->sortByDesc('similarity_score')
+        ->take($limit)
+        ->values();
+
+        return response()->json([
+            'success' => true,
+            'suggestions' => $suggestions,
+            'keywords' => array_values($keywords),
         ]);
     }
 
@@ -390,5 +539,30 @@ public function deanList(Request $request): JsonResponse
             'resolved_at'             => $f->resolved_at,
             'responses_count'         => $f->responses?->count() ?? 0,
         ];
+    }
+
+    private function extractKeywords(string $text): array
+    {
+        $normalized = Str::lower(preg_replace('/[^a-z0-9\s]/i', ' ', $text));
+        $tokens = array_filter(explode(' ', $normalized), function ($token) {
+            return strlen($token) > 3 && !in_array($token, [
+                'that', 'this', 'with', 'have', 'from', 'your', 'please', 'about', 'there',
+                'where', 'when', 'which', 'kwenye', 'kuna', 'hii', 'sana', 'kama',
+            ], true);
+        });
+
+        $counts = array_count_values($tokens);
+        arsort($counts);
+        return array_slice(array_keys($counts), 0, 12);
+    }
+
+    private function keywordSimilarity(array $a, array $b): float
+    {
+        if (empty($a) || empty($b)) {
+            return 0;
+        }
+        $common = array_intersect($a, $b);
+        $union = array_unique(array_merge($a, $b));
+        return count($union) === 0 ? 0 : count($common) / count($union);
     }
 }

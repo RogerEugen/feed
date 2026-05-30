@@ -8,6 +8,7 @@ use App\Http\Controllers\EvaluationAnalyticsController;
 
 // ── Submit feedback (anonymous token required) ─────────────────
 Route::post('/feedback/submit',   [FeedbackController::class, 'submit']);
+Route::post('/feedback/suggestions', [FeedbackController::class, 'suggestResolutions']);
 
 // ── Track feedback by code (no auth needed) ────────────────────
 Route::get('/feedback/track/{code}', [TrackingController::class, 'track']);
@@ -68,6 +69,9 @@ Route::prefix('analytics')->group(function () {
 
 // ── Categories (public — needed for form) ──────────────────────
 Route::get('/categories', [FeedbackController::class, 'categories']);
+Route::post('/categories', [FeedbackController::class, 'storeCategory']);
+Route::put('/categories/{id}', [FeedbackController::class, 'updateCategory']);
+Route::delete('/categories/{id}', [FeedbackController::class, 'deleteCategory']);
 
 // Get lecturers from auth service — proxied through feedback service
 Route::get('/lecturers/{departmentId}', [CourseEvaluationController::class, 'getLecturers']);
