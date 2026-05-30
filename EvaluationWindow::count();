@@ -1,0 +1,53 @@
+[90m= [39m[34;4mIlluminate\Database\Eloquent\Collection[39;24m {#855
+    [34mall[39m: [
+      [34;4mApp\Models\FeedbackCategory[39;24m {#6098
+        [34mid[39m: [35m1[39m,
+        [34mname[39m: "[32mAcademic Issues[39m",
+        [34mroutes_to[39m: "[32mhod[39m",
+        [34msender_role[39m: "[32mstudent[39m",
+      },
+      [34;4mApp\Models\FeedbackCategory[39;24m {#6099
+        [34mid[39m: [35m2[39m,
+        [34mname[39m: "[32mExamination Concerns[39m",
+        [34mroutes_to[39m: "[32mhod[39m",
+        [34msender_role[39m: "[32mstudent[39m",
+      },
+      [34;4mApp\Models\FeedbackCategory[39;24m {#6100
+        [34mid[39m: [35m3[39m,
+        [34mname[39m: "[32mStudent Affairs[39m",
+        [34mroutes_to[39m: "[32mdean[39m",
+        [34msender_role[39m: "[32mstudent[39m",
+      },
+      [34;4mApp\Models\FeedbackCategory[39;24m {#6101
+        [34mid[39m: [35m4[39m,
+        [34mname[39m: "[32mHarassment or Misconduct[39m",
+        [34mroutes_to[39m: "[32mdean[39m",
+        [34msender_role[39m: "[32mstudent[39m",
+      },
+      [34;4mApp\Models\FeedbackCategory[39;24m {#6102
+        [34mid[39m: [35m5[39m,
+        [34mname[39m: "[32mDepartment Management[39m",
+        [34mroutes_to[39m: "[32mrector[39m",
+        [34msender_role[39m: "[32mlecturer[39m",
+      },
+      [34;4mApp\Models\FeedbackCategory[39;24m {#6103
+        [34mid[39m: [35m6[39m,
+        [34mname[39m: "[32mResources and Facilities[39m",
+        [34mroutes_to[39m: "[32mrector[39m",
+        [34msender_role[39m: "[32mlecturer[39m",
+      },
+      [34;4mApp\Models\FeedbackCategory[39;24m {#6104
+        [34mid[39m: [35m7[39m,
+        [34mname[39m: "[32mInfrastructure[39m",
+        [34mroutes_to[39m: "[32madmin[39m",
+        [34msender_role[39m: "[32many[39m",
+      },
+      [34;4mApp\Models\FeedbackCategory[39;24m {#6105
+        [34mid[39m: [35m8[39m,
+        [34mname[39m: "[32mGeneral Suggestion[39m",
+        [34mroutes_to[39m: "[32madmin[39m",
+        [34msender_role[39m: "[32many[39m",
+      },
+    ],
+  }
+

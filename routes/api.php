@@ -1,0 +1,73 @@
+<?php
+use App\Http\Controllers\FeedbackController;
+use App\Http\Controllers\TrackingController;
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\EvaluationWindowController;
+use App\Http\Controllers\CourseEvaluationController;
+use App\Http\Controllers\EvaluationAnalyticsController;
+
+// ── Submit feedback (anonymous token required) ─────────────────
+Route::post('/feedback/submit',   [FeedbackController::class, 'submit']);
+
+// ── Track feedback by code (no auth needed) ────────────────────
+Route::get('/feedback/track/{code}', [TrackingController::class, 'track']);
+Route::post('/feedback/followup',    [TrackingController::class, 'followup']);
+
+// ── HOD endpoints ──────────────────────────────────────────────
+Route::prefix('hod')->group(function () {
+    Route::get('/feedbacks',                   [FeedbackController::class, 'hodList']);
+    Route::get('/feedbacks/{id}',              [FeedbackController::class, 'show']);
+    Route::post('/feedbacks/{id}/respond',     [FeedbackController::class, 'respond']);
+    Route::post('/feedbacks/{id}/escalate',    [FeedbackController::class, 'escalate']);
+    Route::post('/feedbacks/{id}/resolve',     [FeedbackController::class, 'resolve']);
+});
+
+// ── Dean endpoints ─────────────────────────────────────────────
+Route::prefix('dean')->group(function () {
+    Route::get('/feedbacks',                   [FeedbackController::class, 'deanList']);
+    Route::get('/feedbacks/{id}',              [FeedbackController::class, 'show']);
+    Route::post('/feedbacks/{id}/respond',     [FeedbackController::class, 'respond']);
+    Route::post('/feedbacks/{id}/escalate',    [FeedbackController::class, 'escalate']);
+    Route::post('/feedbacks/{id}/resolve',     [FeedbackController::class, 'resolve']);
+});
+
+// ── Rector endpoints ───────────────────────────────────────────
+Route::prefix('rector')->group(function () {
+    Route::get('/feedbacks',    [FeedbackController::class, 'rectorList']);
+    Route::get('/feedbacks/{id}', [FeedbackController::class, 'show']);
+    Route::post('/feedbacks/{id}/respond',    [FeedbackController::class, 'respond']);
+    Route::post('/feedbacks/{id}/resolve', [FeedbackController::class, 'resolve']);
+});
+
+
+// ── Evaluation Windows ─────────────────────────────────────────
+Route::prefix('evaluation-windows')->group(function () {
+    Route::get('/',           [EvaluationWindowController::class, 'index']);
+    Route::get('/active',     [EvaluationWindowController::class, 'active']);
+    Route::post('/',          [EvaluationWindowController::class, 'store']);
+    Route::post('/{id}/toggle', [EvaluationWindowController::class, 'toggle']);
+    Route::delete('/{id}',    [EvaluationWindowController::class, 'destroy']);
+});
+
+// ── Course Evaluations ─────────────────────────────────────────
+Route::prefix('evaluations')->group(function () {
+    Route::post('/submit',             [CourseEvaluationController::class, 'submit']);
+    Route::get('/check',               [CourseEvaluationController::class, 'checkSubmitted']);
+    Route::get('/course',              [CourseEvaluationController::class, 'courseResults']);
+    Route::get('/department',          [CourseEvaluationController::class, 'departmentResults']);
+    Route::get('/faculty',             [CourseEvaluationController::class, 'facultyResults']);
+    Route::get('/lecturer',            [CourseEvaluationController::class, 'lecturerResults']); // ✅ NEW
+});
+
+// ── Evaluation Analytics (Rector/Admin) ───────────────────────
+Route::prefix('analytics')->group(function () {
+    Route::get('/overview', [EvaluationAnalyticsController::class, 'systemOverview']);
+    Route::get('/by-faculty', [EvaluationAnalyticsController::class, 'byFaculty']);
+    Route::get('/trends',    [EvaluationAnalyticsController::class, 'trends']);
+});
+
+// ── Categories (public — needed for form) ──────────────────────
+Route::get('/categories', [FeedbackController::class, 'categories']);
+
+// Get lecturers from auth service — proxied through feedback service
+Route::get('/lecturers/{departmentId}', [CourseEvaluationController::class, 'getLecturers']);
