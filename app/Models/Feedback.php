@@ -41,11 +41,11 @@ class Feedback extends Model
         ];
     }
 
-    // Generate a unique tracking code e.g. FB-2024-XKQT
+    // Longer random suffix makes tracking-code-only private threads harder to guess.
     public static function generateTrackingCode(): string
     {
         do {
-            $code = 'FB-' . date('Y') . '-' . strtoupper(Str::random(4));
+            $code = 'FB-' . date('Y') . '-' . strtoupper(Str::random(8));
         } while (self::where('tracking_code', $code)->exists());
 
         return $code;

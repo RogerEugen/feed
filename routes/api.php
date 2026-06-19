@@ -5,6 +5,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\EvaluationWindowController;
 use App\Http\Controllers\CourseEvaluationController;
 use App\Http\Controllers\EvaluationAnalyticsController;
+use App\Http\Controllers\CommunicationController;
 
 // ── Submit feedback (anonymous token required) ─────────────────
 Route::post('/feedback/submit',   [FeedbackController::class, 'submit']);
@@ -13,6 +14,10 @@ Route::post('/feedback/suggestions', [FeedbackController::class, 'suggestResolut
 // ── Track feedback by code (no auth needed) ────────────────────
 Route::get('/feedback/track/{code}', [TrackingController::class, 'track']);
 Route::post('/feedback/followup',    [TrackingController::class, 'followup']);
+Route::get('/feedback/lecturer-thread/{code}', [TrackingController::class, 'lecturerThread']);
+
+Route::get('/communications/{room}', [CommunicationController::class, 'index']);
+Route::post('/communications/{room}', [CommunicationController::class, 'store']);
 
 // ── HOD endpoints ──────────────────────────────────────────────
 Route::prefix('hod')->group(function () {
@@ -34,6 +39,9 @@ Route::prefix('dean')->group(function () {
 
 // ── Rector endpoints ───────────────────────────────────────────
 Route::prefix('rector')->group(function () {
+    Route::get('/lecturer-threads', [TrackingController::class, 'rectorThreads']);
+    Route::get('/lecturer-threads/{code}', [TrackingController::class, 'rectorThread']);
+    Route::post('/lecturer-threads/{code}/reply', [TrackingController::class, 'rectorReply']);
     Route::get('/feedbacks',    [FeedbackController::class, 'rectorList']);
     Route::get('/feedbacks/{id}', [FeedbackController::class, 'show']);
     Route::post('/feedbacks/{id}/respond',    [FeedbackController::class, 'respond']);

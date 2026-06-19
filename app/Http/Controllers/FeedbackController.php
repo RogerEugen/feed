@@ -1,13 +1,16 @@
 <?php
 namespace App\Http\Controllers;
 
+use App\Events\FeedbackMessageSent;
 use App\Models\Feedback;
 use App\Models\FeedbackAttachment;
 use App\Models\FeedbackCategory;
 use App\Models\FeedbackResponse;
+use App\Services\LanguageModerationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 
@@ -139,6 +142,14 @@ class FeedbackController extends Controller
                 'message' => 'Validation failed.',
                 'errors'  => $validator->errors(),
             ], 422);
+        }
+
+        $moderation = app(LanguageModerationService::class)->inspect($request->content);
+        if ($moderation['violates']) {
+            return $this->rejectUnsafeContent(
+                $request->anonymous_token,
+                $request->content
+            );
         }
 
         // ── ROLE ROUTING ENFORCEMENT ──────────────────────────────
@@ -291,9 +302,10 @@ public function deanList(Request $request): JsonResponse
                 ]),
                 'followups' => $feedback->followups->map(fn($f) => [
                     'direction' => $f->direction,
-                    'comntent'   => $this->decryptContent($f->encrypted_message, $f->encryption_iv),
+                    'content'    => $this->decryptContent($f->encrypted_message, $f->encryption_iv),
                     'sent_at'   => $f->sent_at,
                 ]),
+                'realtime_channel' => $this->realtimeChannel($feedback->tracking_code),
             ],
         ]);
     }
@@ -331,6 +343,16 @@ public function deanList(Request $request): JsonResponse
         ]);
 
         $feedback->update(['status' => 'under_review']);
+
+        broadcast(new FeedbackMessageSent(
+            $this->realtimeChannel($feedback->tracking_code),
+            [
+                'type' => 'response',
+                'responder_role' => $request->responder_role,
+                'content' => $request->response,
+                'sent_at' => now()->toIso8601String(),
+            ]
+        ));
 
         return response()->json([
             'success' => true,
@@ -495,6 +517,51 @@ public function deanList(Request $request): JsonResponse
         }
     }
 
+    private function rejectUnsafeContent(string $anonymousToken, string $content): JsonResponse
+    {
+        try {
+            $response = Http::timeout(5)->post(
+                config('services.auth_service.url') . '/api/token/content-violation',
+                [
+                    'anonymous_token' => $anonymousToken,
+                    'content_fingerprint' => hash_hmac(
+                        'sha256',
+                        $content,
+                        (string) config('app.key')
+                    ),
+                ]
+            );
+
+            if (!$response->successful()) {
+                return response()->json([
+                    'success' => false,
+                    'code' => 'LANGUAGE_VIOLATION',
+                    'message' => config('language.first_warning'),
+                ], 422);
+            }
+
+            $review = (bool) $response->json('student_affairs_review', false);
+
+            return response()->json([
+                'success' => false,
+                'code' => $review
+                    ? 'LANGUAGE_VIOLATION_ESCALATED'
+                    : 'LANGUAGE_VIOLATION',
+                'warning_count' => (int) $response->json('violation_count', 1),
+                'student_affairs_review' => $review,
+                'message' => $review
+                    ? config('language.final_warning')
+                    : config('language.first_warning'),
+            ], 422);
+        } catch (\Throwable) {
+            return response()->json([
+                'success' => false,
+                'code' => 'LANGUAGE_VIOLATION',
+                'message' => config('language.first_warning'),
+            ], 422);
+        }
+    }
+
     private function encryptContent(string $content, string $iv): string
     {
         $key = config('app.feedback_encryption_key', config('app.key'));
@@ -564,5 +631,10 @@ public function deanList(Request $request): JsonResponse
         $common = array_intersect($a, $b);
         $union = array_unique(array_merge($a, $b));
         return count($union) === 0 ? 0 : count($common) / count($union);
+    }
+
+    private function realtimeChannel(string $trackingCode): string
+    {
+        return hash_hmac('sha256', $trackingCode, (string) config('app.key'));
     }
 }
