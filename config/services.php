@@ -39,5 +39,8 @@ return [
         'url' => env('AUTH_SERVICE_URL', 'http://localhost:8001'),
     ],
 
+    'view_service' => [
+        'key' => env('VIEW_SERVICE_KEY'),
+    ],
 
 ];
