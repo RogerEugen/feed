@@ -6,7 +6,10 @@ use Illuminate\Support\Str;
 
 class LanguageModerationService
 {
-    public function __construct(private readonly ?array $blockedTerms = null)
+    public function __construct(
+        private readonly ?array $blockedTerms = null,
+        private readonly ?array $blockedPatterns = null,
+    )
     {
     }
 
@@ -22,6 +25,12 @@ class LanguageModerationService
             }
         }
 
+        foreach ($this->blockedPatterns ?? config('language.blocked_patterns', []) as $pattern) {
+            if (@preg_match($pattern, $normalized) === 1) {
+                $matches[] = 'prohibited-pattern';
+            }
+        }
+
         return [
             'violates' => $matches !== [],
             'matches' => array_values(array_unique($matches)),
@@ -30,7 +39,20 @@ class LanguageModerationService
 
     private function normalize(string $value): string
     {
+        $value = preg_replace('/[\x{200B}-\x{200D}\x{2060}\x{FEFF}]/u', '', $value) ?? $value;
         $value = Str::lower(Str::ascii($value));
+        $value = strtr($value, [
+            '@' => 'a',
+            '$' => 's',
+            '!' => 'i',
+            '|' => 'i',
+            '0' => 'o',
+            '1' => 'i',
+            '3' => 'e',
+            '4' => 'a',
+            '5' => 's',
+            '7' => 't',
+        ]);
         $value = preg_replace('/(.)\1{2,}/u', '$1$1', $value);
         $value = preg_replace('/[^a-z0-9]+/u', ' ', $value);
         $value = preg_replace_callback(
