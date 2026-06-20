@@ -507,6 +507,7 @@ public function deanList(Request $request): JsonResponse
             'faculty_id' => ['nullable', 'integer'],
             'status' => ['nullable', 'in:all,open,resolved'],
             'category_id' => ['nullable', 'integer', 'exists:feedback_categories,id'],
+            'filter_department_id' => ['nullable', 'integer'],
             'minimum_group_size' => ['nullable', 'integer', 'min:1', 'max:20'],
         ]);
 
@@ -534,6 +535,10 @@ public function deanList(Request $request): JsonResponse
             ->when($request->filled('category_id'), fn ($q) => $q->where(
                 'category_id',
                 (int) $request->category_id
+            ))
+            ->when($request->filled('filter_department_id'), fn ($q) => $q->where(
+                'recipient_department_id',
+                (int) $request->filter_department_id
             ))
             ->when($request->status === 'open', fn ($q) => $q->whereNotIn('status', ['resolved', 'closed']))
             ->when($request->status === 'resolved', fn ($q) => $q->where('status', 'resolved'))
@@ -574,6 +579,10 @@ public function deanList(Request $request): JsonResponse
                 'recurring_groups' => $groups->count(),
                 'grouped_feedbacks' => $groups->sum('feedback_count'),
                 'groups_with_solution' => $groups->whereNotNull('suggested_solution')->count(),
+                'priority_investigations' => $groups
+                    ->whereIn('investigation_level', ['critical', 'high'])
+                    ->count(),
+                'departments_affected' => $groups->pluck('department_id')->filter()->unique()->count(),
             ],
         ]);
     }

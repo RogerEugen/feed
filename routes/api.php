@@ -17,8 +17,10 @@ Route::get('/feedback/track/{code}', [TrackingController::class, 'track']);
 Route::post('/feedback/followup',    [TrackingController::class, 'followup']);
 Route::get('/feedback/lecturer-thread/{code}', [TrackingController::class, 'lecturerThread']);
 
+Route::post('/communications/overview', [CommunicationController::class, 'overview']);
 Route::get('/communications/{room}', [CommunicationController::class, 'index']);
 Route::post('/communications/{room}', [CommunicationController::class, 'store']);
+Route::post('/communications/{room}/read', [CommunicationController::class, 'markRead']);
 
 // ── HOD endpoints ──────────────────────────────────────────────
 Route::prefix('hod')->group(function () {

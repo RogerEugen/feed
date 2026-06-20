@@ -19,6 +19,9 @@ class FeedbackGroupingService
                 if ((int) $cluster['category_id'] !== (int) $feedback['category_id']) {
                     continue;
                 }
+                if ((int) ($cluster['department_id'] ?? 0) !== (int) ($feedback['recipient_department_id'] ?? 0)) {
+                    continue;
+                }
 
                 $score = $this->similarity($feedback['keywords'], $cluster['keywords']);
                 if ($score >= $threshold && $score > $bestScore) {
@@ -31,6 +34,8 @@ class FeedbackGroupingService
                 $clusters[] = [
                     'category_id' => $feedback['category_id'],
                     'category' => $feedback['category'],
+                    'department_id' => $feedback['recipient_department_id'] ?? null,
+                    'faculty_id' => $feedback['recipient_faculty_id'] ?? null,
                     'keywords' => $feedback['keywords'],
                     'members' => [$feedback],
                 ];
@@ -67,6 +72,7 @@ class FeedbackGroupingService
             preg_split('/\s+/u', $normalized) ?: [],
             fn (string $token) => mb_strlen($token) > 3 && !in_array($token, $stopWords, true)
         );
+        $tokens = array_map(fn (string $token) => $this->canonicalKeyword($token), $tokens);
 
         $counts = array_count_values($tokens);
         arsort($counts);
@@ -96,7 +102,9 @@ class FeedbackGroupingService
         }
         arsort($counts);
 
-        return array_slice(array_keys($counts), 0, 16);
+        $repeated = array_keys(array_filter($counts, fn (int $count) => $count >= 2));
+
+        return array_slice($repeated !== [] ? $repeated : array_keys($counts), 0, 16);
     }
 
     private function formatCluster(array $cluster): array
@@ -108,18 +116,42 @@ class FeedbackGroupingService
             ->first();
         $latest = $members->sortByDesc('submitted_at')->first();
         $topKeywords = array_slice($cluster['keywords'], 0, 4);
+        $openCount = $members->whereNotIn('status', ['resolved', 'closed'])->count();
+        $urgentCount = $members->where('priority', 'urgent')->count();
+        $escalatedCount = $members->where('is_escalated', true)->count();
+        $investigationScore = min(
+            100,
+            ($members->count() * 12)
+            + ($openCount * 6)
+            + ($urgentCount * 15)
+            + ($escalatedCount * 10)
+        );
+        $investigationLevel = match (true) {
+            $investigationScore >= 70 => 'critical',
+            $investigationScore >= 45 => 'high',
+            $investigationScore >= 25 => 'moderate',
+            default => 'watch',
+        };
 
         return [
-            'group_key' => hash('sha256', $cluster['category_id'].'|'.implode('|', $topKeywords)),
+            'group_key' => hash('sha256', implode('|', [
+                $cluster['department_id'] ?? 0,
+                $cluster['category_id'],
+                ...$topKeywords,
+            ])),
             'title' => $this->makeTitle((string) $cluster['category'], $topKeywords),
             'category_id' => $cluster['category_id'],
             'category' => $cluster['category'],
+            'department_id' => $cluster['department_id'] ?? null,
+            'faculty_id' => $cluster['faculty_id'] ?? null,
             'keywords' => $topKeywords,
             'feedback_count' => $members->count(),
-            'open_count' => $members->whereNotIn('status', ['resolved', 'closed'])->count(),
+            'open_count' => $openCount,
             'resolved_count' => $members->where('status', 'resolved')->count(),
-            'urgent_count' => $members->where('priority', 'urgent')->count(),
-            'departments_count' => $members->pluck('recipient_department_id')->filter()->unique()->count(),
+            'urgent_count' => $urgentCount,
+            'escalated_count' => $escalatedCount,
+            'investigation_score' => $investigationScore,
+            'investigation_level' => $investigationLevel,
             'latest_at' => $latest['submitted_at'] ?? null,
             'suggested_solution' => $resolved['resolution'] ?? null,
             'solution_source_id' => $resolved['id'] ?? null,
@@ -150,5 +182,40 @@ class FeedbackGroupingService
         }
 
         return $category.': '.Str::headline(implode(' ', array_slice($keywords, 0, 3)));
+    }
+
+    private function canonicalKeyword(string $token): string
+    {
+        return [
+            'teacher' => 'lecturer',
+            'teachers' => 'lecturer',
+            'lecturers' => 'lecturer',
+            'mwalimu' => 'lecturer',
+            'walimu' => 'lecturer',
+            'darasa' => 'class',
+            'darasani' => 'class',
+            'classes' => 'class',
+            'lecture' => 'class',
+            'lectures' => 'class',
+            'attend' => 'attendance',
+            'attends' => 'attendance',
+            'attending' => 'attendance',
+            'attendance' => 'attendance',
+            'absent' => 'attendance',
+            'absence' => 'attendance',
+            'haingii' => 'attendance',
+            'hajaingia' => 'attendance',
+            'hudhuria' => 'attendance',
+            'hahudhurii' => 'attendance',
+            'fundisha' => 'teaching',
+            'kufundisha' => 'teaching',
+            'teaches' => 'teaching',
+            'teaching' => 'teaching',
+            'late' => 'delay',
+            'delayed' => 'delay',
+            'delay' => 'delay',
+            'chelewa' => 'delay',
+            'amechelewa' => 'delay',
+        ][$token] ?? $token;
     }
 }
