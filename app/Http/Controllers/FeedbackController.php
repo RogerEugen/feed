@@ -432,6 +432,15 @@ public function deanList(Request $request): JsonResponse
             'resolved_at' => now(),
         ]);
 
+        broadcast(new FeedbackMessageSent(
+            $this->realtimeChannel($feedback->tracking_code),
+            [
+                'type' => 'resolved',
+                'status' => 'resolved',
+                'resolved_at' => now()->toIso8601String(),
+            ]
+        ));
+
         return response()->json([
             'success' => true,
             'message' => 'Feedback marked as resolved.',

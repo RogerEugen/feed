@@ -50,6 +50,15 @@ class TrackingController extends Controller
             ], 403);
         }
 
+        if ($feedback->status === 'resolved') {
+            return response()->json([
+                'success' => false,
+                'code' => 'ISSUE_RESOLVED',
+                'message' => 'Your issue is resolved. No open chat is available for this tracking code.',
+                'resolved_at' => $feedback->resolved_at,
+            ], 409);
+        }
+
         return response()->json([
             'success' => true,
             'thread' => $this->threadPayload($feedback),
@@ -66,6 +75,7 @@ class TrackingController extends Controller
             ->with(['category', 'responses', 'followups'])
             ->where('sender_role', 'lecturer')
             ->whereIn('routed_to', ['rector', 'admin'])
+            ->where('status', '!=', 'resolved')
             ->orderByDesc('submitted_at')
             ->limit(150)
             ->get()
@@ -105,6 +115,13 @@ class TrackingController extends Controller
             return response()->json(['message' => 'Lecturer feedback thread not found.'], 404);
         }
 
+        if ($feedback->status === 'resolved') {
+            return response()->json([
+                'code' => 'ISSUE_RESOLVED',
+                'message' => 'This issue is resolved and its chat is closed.',
+            ], 409);
+        }
+
         return response()->json([
             'success' => true,
             'thread' => $this->threadPayload($feedback),
@@ -135,6 +152,13 @@ class TrackingController extends Controller
         $feedback = $this->findLecturerFeedback($code);
         if (!$feedback) {
             return response()->json(['message' => 'Lecturer feedback thread not found.'], 404);
+        }
+
+        if ($feedback->status === 'resolved') {
+            return response()->json([
+                'code' => 'ISSUE_RESOLVED',
+                'message' => 'This issue is resolved and its chat is closed.',
+            ], 409);
         }
 
         $iv = bin2hex(random_bytes(8));
@@ -242,7 +266,7 @@ class TrackingController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'tracking_code'        => ['required', 'string'],
-            'message'              => ['required', 'string', 'min:5', 'max:2000'],
+            'message'              => ['required', 'string', 'min:2', 'max:3000'],
             'direction'            => ['required', 'in:sender_to_recipient,recipient_to_sender'],
             'sender_role'          => ['required', 'string'],
             'sender_department_id' => ['nullable', 'integer'],
@@ -277,6 +301,14 @@ class TrackingController extends Controller
                 'success' => false,
                 'message' => 'Tracking code not found.',
             ], 404);
+        }
+
+        if ($feedback->status === 'resolved') {
+            return response()->json([
+                'success' => false,
+                'code' => 'ISSUE_RESOLVED',
+                'message' => 'Your issue is resolved. No open chat is available for this tracking code.',
+            ], 409);
         }
 
         // ── ROLE CHECK ────────────────────────────────────────────
