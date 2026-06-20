@@ -7,6 +7,7 @@ use App\Models\FeedbackAttachment;
 use App\Models\FeedbackCategory;
 use App\Models\FeedbackResponse;
 use App\Services\LanguageModerationService;
+use App\Services\FeedbackGroupingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
@@ -495,6 +496,154 @@ public function deanList(Request $request): JsonResponse
             'success' => true,
             'suggestions' => $suggestions,
             'keywords' => array_values($keywords),
+        ]);
+    }
+
+    public function recurringGroups(Request $request, FeedbackGroupingService $grouping): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'role' => ['required', 'in:hod,dean,rector'],
+            'department_id' => ['nullable', 'integer'],
+            'faculty_id' => ['nullable', 'integer'],
+            'status' => ['nullable', 'in:all,open,resolved'],
+            'category_id' => ['nullable', 'integer', 'exists:feedback_categories,id'],
+            'minimum_group_size' => ['nullable', 'integer', 'min:1', 'max:20'],
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        if ($request->role === 'hod' && !$request->filled('department_id')) {
+            return response()->json(['success' => false, 'message' => 'Department scope is required.'], 422);
+        }
+        if ($request->role === 'dean' && !$request->filled('faculty_id')) {
+            return response()->json(['success' => false, 'message' => 'Faculty scope is required.'], 422);
+        }
+
+        $query = Feedback::with(['category', 'responses'])
+            ->whereNotIn('status', ['closed'])
+            ->when($request->role === 'hod', fn ($q) => $q->where(
+                'recipient_department_id',
+                (int) $request->department_id
+            ))
+            ->when($request->role === 'dean', fn ($q) => $q->where(
+                'recipient_faculty_id',
+                (int) $request->faculty_id
+            ))
+            ->when($request->filled('category_id'), fn ($q) => $q->where(
+                'category_id',
+                (int) $request->category_id
+            ))
+            ->when($request->status === 'open', fn ($q) => $q->whereNotIn('status', ['resolved', 'closed']))
+            ->when($request->status === 'resolved', fn ($q) => $q->where('status', 'resolved'))
+            ->orderByDesc('submitted_at')
+            ->limit(500)
+            ->get();
+
+        $items = $query->map(function (Feedback $feedback) {
+            $resolutionResponse = $feedback->responses
+                ->where('is_escalation_note', false)
+                ->sortByDesc('responded_at')
+                ->first();
+            $isResolutionNote = $feedback->status === 'resolved'
+                && $feedback->resolved_at
+                && $resolutionResponse
+                && abs($resolutionResponse->responded_at->diffInMinutes($feedback->resolved_at, false)) <= 10;
+
+            return [
+                ...$this->formatFeedback($feedback),
+                'recipient_faculty_id' => $feedback->recipient_faculty_id,
+                'content' => $this->decryptContent($feedback->encrypted_content, $feedback->encryption_iv),
+                'resolution' => $isResolutionNote
+                    ? $this->decryptContent($resolutionResponse->encrypted_response, $resolutionResponse->encryption_iv)
+                    : null,
+            ];
+        })->all();
+
+        $minimumSize = (int) $request->input('minimum_group_size', 2);
+        $groups = collect($grouping->group($items))
+            ->filter(fn (array $group) => $group['feedback_count'] >= $minimumSize)
+            ->values();
+
+        return response()->json([
+            'success' => true,
+            'groups' => $groups,
+            'summary' => [
+                'feedbacks_analysed' => count($items),
+                'recurring_groups' => $groups->count(),
+                'grouped_feedbacks' => $groups->sum('feedback_count'),
+                'groups_with_solution' => $groups->whereNotNull('suggested_solution')->count(),
+            ],
+        ]);
+    }
+
+    public function rectorReport(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'date_from' => ['nullable', 'date'],
+            'date_to' => ['nullable', 'date', 'after_or_equal:date_from'],
+            'faculty_id' => ['nullable', 'integer'],
+            'department_id' => ['nullable', 'integer'],
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        $feedbacks = Feedback::query()
+            ->whereNotIn('status', ['closed'])
+            ->when($request->filled('date_from'), fn ($q) => $q->whereDate('submitted_at', '>=', $request->date_from))
+            ->when($request->filled('date_to'), fn ($q) => $q->whereDate('submitted_at', '<=', $request->date_to))
+            ->when($request->filled('faculty_id'), fn ($q) => $q->where('recipient_faculty_id', (int) $request->faculty_id))
+            ->when($request->filled('department_id'), fn ($q) => $q->where('recipient_department_id', (int) $request->department_id))
+            ->get();
+
+        $summarize = function ($items, string $key): array {
+            return $items->groupBy($key)->map(function ($group, $id) {
+                $total = $group->count();
+                $resolved = $group->where('status', 'resolved')->count();
+                $resolvedHours = $group->filter(fn ($item) => $item->resolved_at && $item->submitted_at)
+                    ->map(fn ($item) => $item->submitted_at->diffInHours($item->resolved_at));
+
+                return [
+                    'id' => $id === '' ? null : (int) $id,
+                    'total' => $total,
+                    'open' => $group->whereNotIn('status', ['resolved', 'closed'])->count(),
+                    'resolved' => $resolved,
+                    'urgent' => $group->where('priority', 'urgent')->count(),
+                    'escalated' => $group->where('is_escalated', true)->count(),
+                    'student' => $group->where('sender_role', 'student')->count(),
+                    'lecturer' => $group->where('sender_role', 'lecturer')->count(),
+                    'resolution_rate' => $total > 0 ? round(($resolved / $total) * 100, 1) : 0,
+                    'average_resolution_hours' => $resolvedHours->isNotEmpty()
+                        ? round($resolvedHours->average(), 1)
+                        : null,
+                ];
+            })->sortByDesc('total')->values()->all();
+        };
+
+        $total = $feedbacks->count();
+        $resolved = $feedbacks->where('status', 'resolved')->count();
+
+        return response()->json([
+            'success' => true,
+            'generated_at' => now()->toIso8601String(),
+            'filters' => $request->only(['date_from', 'date_to', 'faculty_id', 'department_id']),
+            'summary' => [
+                'total' => $total,
+                'open' => $feedbacks->whereNotIn('status', ['resolved', 'closed'])->count(),
+                'resolved' => $resolved,
+                'urgent' => $feedbacks->where('priority', 'urgent')->count(),
+                'escalated' => $feedbacks->where('is_escalated', true)->count(),
+                'resolution_rate' => $total > 0 ? round(($resolved / $total) * 100, 1) : 0,
+            ],
+            'by_faculty' => $summarize($feedbacks, 'recipient_faculty_id'),
+            'by_department' => $summarize($feedbacks, 'recipient_department_id'),
+            'by_category' => $feedbacks->groupBy('category_id')->map(fn ($group, $id) => [
+                'category_id' => (int) $id,
+                'total' => $group->count(),
+                'resolved' => $group->where('status', 'resolved')->count(),
+            ])->sortByDesc('total')->values()->all(),
         ]);
     }
 

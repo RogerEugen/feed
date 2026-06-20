@@ -10,6 +10,7 @@ use App\Http\Controllers\CommunicationController;
 // ── Submit feedback (anonymous token required) ─────────────────
 Route::post('/feedback/submit',   [FeedbackController::class, 'submit']);
 Route::post('/feedback/suggestions', [FeedbackController::class, 'suggestResolutions']);
+Route::get('/feedback/recurring-groups', [FeedbackController::class, 'recurringGroups']);
 
 // ── Track feedback by code (no auth needed) ────────────────────
 Route::get('/feedback/track/{code}', [TrackingController::class, 'track']);
@@ -39,6 +40,7 @@ Route::prefix('dean')->group(function () {
 
 // ── Rector endpoints ───────────────────────────────────────────
 Route::prefix('rector')->group(function () {
+    Route::get('/reports/feedback', [FeedbackController::class, 'rectorReport']);
     Route::get('/lecturer-threads', [TrackingController::class, 'rectorThreads']);
     Route::get('/lecturer-threads/{code}', [TrackingController::class, 'rectorThread']);
     Route::post('/lecturer-threads/{code}/reply', [TrackingController::class, 'rectorReply']);
