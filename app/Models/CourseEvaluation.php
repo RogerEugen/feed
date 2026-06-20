@@ -9,6 +9,7 @@ class CourseEvaluation extends Model
 
     protected $fillable = [
         'anonymous_token_hash',
+        'participant_hash',
         'window_id',
         'course_code',
         'subject_name',

@@ -16,10 +16,28 @@ class CourseEvaluationController extends Controller
     // ── Check if student already evaluated a course ────────────
     public function checkSubmitted(Request $request): JsonResponse
     {
-        $tokenHash = hash('sha256', $request->anonymous_token ?? '');
+        $validator = Validator::make($request->all(), [
+            'anonymous_token' => ['required', 'string', 'min:10'],
+            'window_id' => ['required', 'integer'],
+            'course_code' => ['required', 'string'],
+            'lecturer_id' => ['required', 'integer'],
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
 
-        $exists = CourseEvaluation::where('anonymous_token_hash', $tokenHash)
-            ->where('course_code', $request->course_code)
+        $authCheck = $this->validateAnonTokenForEvaluation($request->anonymous_token);
+        $tokenHash = hash('sha256', $request->anonymous_token);
+        $participantHash = $authCheck['participant_key'] ?? null;
+
+        $exists = CourseEvaluation::where(function ($query) use ($participantHash, $tokenHash) {
+                $participantHash
+                    ? $query->where('participant_hash', $participantHash)
+                    : $query->where('anonymous_token_hash', $tokenHash);
+            })
+            ->where('window_id', $request->window_id)
+            ->where('course_code', strtoupper(trim($request->course_code)))
+            ->where('lecturer_id', $request->lecturer_id)
             ->exists();
 
         return response()->json([
@@ -60,7 +78,8 @@ class CourseEvaluationController extends Controller
         ], 422);
     }
 
-    // Check window is open
+    // Window, academic year and semester are authoritative. Student input may
+    // never move an evaluation into a different period.
     $window = EvaluationWindow::find($request->window_id);
     if (!$window) {
         return response()->json([
@@ -69,23 +88,68 @@ class CourseEvaluationController extends Controller
         ], 404);
     }
 
+    if (
+        !$window->is_active
+        || now()->lt($window->opens_at)
+        || now()->gt($window->closes_at)
+    ) {
+        return response()->json([
+            'success' => false,
+            'message' => 'This evaluation window is not currently open.',
+        ], 422);
+    }
+
+    if (
+        $request->academic_year !== $window->academic_year
+        || (int) $request->semester !== (int) $window->semester
+    ) {
+        return response()->json([
+            'success' => false,
+            'message' => 'The academic year or semester does not match the active evaluation window.',
+        ], 422);
+    }
+
     // ✅ For evaluation we do NOT use is_used check
     // We validate the token exists and is not expired/revoked
     // but we DON'T mark it as used (evaluations are not one-time submissions)
     $authCheck = $this->validateAnonTokenForEvaluation($request->anonymous_token);
-    if (!$authCheck['valid']) {
+    if (!$authCheck['valid'] || ($authCheck['role'] ?? null) !== 'student') {
         return response()->json([
             'success' => false,
-            'message' => $authCheck['message'],
+            'message' => $authCheck['message'] ?? 'Only students can submit course evaluations.',
         ], 401);
+    }
+
+    if (
+        !empty($authCheck['department_id'])
+        && (int) $authCheck['department_id'] !== (int) $request->department_id
+    ) {
+        return response()->json([
+            'success' => false,
+            'message' => 'You can only evaluate lecturers in your own department.',
+        ], 403);
+    }
+
+    if (!$this->lecturerBelongsToDepartment((int) $request->lecturer_id, (int) $request->department_id)) {
+        return response()->json([
+            'success' => false,
+            'message' => 'The selected lecturer does not belong to your department.',
+        ], 422);
     }
 
     $tokenHash  = hash('sha256', $request->anonymous_token);
     $courseCode = strtoupper(trim($request->course_code));
 
-    // Check duplicate — same token hash + course + window
-    $exists = CourseEvaluation::where('anonymous_token_hash', $tokenHash)
+    $participantHash = $authCheck['participant_key'] ?? null;
+
+    // Stable participant hash survives token refreshes without exposing identity.
+    $exists = CourseEvaluation::where(function ($query) use ($participantHash, $tokenHash) {
+            $participantHash
+                ? $query->where('participant_hash', $participantHash)
+                : $query->where('anonymous_token_hash', $tokenHash);
+        })
         ->where('course_code', $courseCode)
+        ->where('lecturer_id', $request->lecturer_id)
         ->where('window_id', $request->window_id)
         ->exists();
 
@@ -107,6 +171,7 @@ class CourseEvaluationController extends Controller
 
     $evaluation = CourseEvaluation::create([
         'anonymous_token_hash'   => $tokenHash,
+        'participant_hash'       => $participantHash,
         'window_id'              => $request->window_id,
         'course_code'            => $courseCode,
         'subject_name'           => $request->subject_name,
@@ -153,7 +218,7 @@ private function validateAnonTokenForEvaluation(string $plainToken): array
             );
 
         if ($response->successful()) {
-            return ['valid' => true];
+            return ['valid' => true, ...$response->json()];
         }
 
         return [
@@ -168,68 +233,39 @@ private function validateAnonTokenForEvaluation(string $plainToken): array
     // ── Get department results (HOD view) ──────────────────────
     public function departmentResults(Request $request): JsonResponse
     {
+        $validator = Validator::make($request->all(), [
+            'department_id' => ['required', 'integer', 'min:1'],
+            'window_id' => ['required', 'integer', 'exists:evaluation_windows,id'],
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
         $departmentId = $request->query('department_id');
         $windowId     = $request->query('window_id');
 
-        $analytics = EvaluationAnalytic::where('department_id', $departmentId)
-            ->when($windowId, fn($q) => $q->where('window_id', $windowId))
-            ->where('results_visible', true)
-            ->with('window')
-            ->orderByDesc('avg_overall')
-            ->get();
-
-        // For each analytic, get the most recent subject_name and lecturer_name
-        // from the actual evaluations (since analytics table doesn't store these)
         return response()->json([
             'success'   => true,
-            'analytics' => $analytics->map(function ($a) {
-                // Get first evaluation for this course to get names
-                $sample = \App\Models\CourseEvaluation::where('course_code', $a->course_code)
-                    ->where('window_id', $a->window_id)
-                    ->where('department_id', $a->department_id)
-                    ->first(['subject_name', 'lecturer_name']);
-
-                return [
-                    'course_code'             => $a->course_code,
-                    'subject_name'            => $sample?->subject_name,
-                    'lecturer_name'           => $sample?->lecturer_name,
-                    'window'                  => $a->window?->title,
-                    'total_responses'         => $a->total_responses,
-                    'avg_teaching_quality'    => round($a->avg_teaching_quality, 2),
-                    'avg_course_content'      => round($a->avg_course_content, 2),
-                    'avg_assessment_fairness' => round($a->avg_assessment_fairness, 2),
-                    'avg_resources'           => round($a->avg_resources, 2),
-                    'avg_accessibility'       => round($a->avg_accessibility, 2),
-                    'avg_overall'             => round($a->avg_overall, 2),
-                    'dept_avg_overall'        => round($a->dept_avg_overall, 2),
-                ];
-            }),
+            'analytics' => $this->groupedResults($windowId, (int) $departmentId, null, null),
         ]);
     }
     // ── Get faculty results (Dean view) ───────────────────────
     public function facultyResults(Request $request): JsonResponse
     {
+        $validator = Validator::make($request->all(), [
+            'faculty_id' => ['required', 'integer', 'min:1'],
+            'window_id' => ['required', 'integer', 'exists:evaluation_windows,id'],
+        ]);
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+        }
+
         $facultyId = $request->query('faculty_id');
         $windowId  = $request->query('window_id');
 
-        $analytics = EvaluationAnalytic::where('faculty_id', $facultyId)
-            ->when($windowId, fn($q) => $q->where('window_id', $windowId))
-            ->where('results_visible', true)
-            ->with('window')
-            ->orderByDesc('avg_overall')
-            ->get();
-
         return response()->json([
             'success'   => true,
-            'analytics' => $analytics->map(fn($a) => [
-                'course_code'         => $a->course_code,
-                'department_id'       => $a->department_id,
-                'window'              => $a->window?->title,
-                'total_responses'     => $a->total_responses,
-                'avg_overall'         => round($a->avg_overall, 2),
-                'dept_avg_overall'    => round($a->dept_avg_overall, 2),
-                'faculty_avg_overall' => round($a->faculty_avg_overall, 2),
-            ]),
+            'analytics' => $this->groupedResults($windowId, null, (int) $facultyId, null),
         ]);
     }
 
@@ -331,9 +367,33 @@ private function validateAnonTokenForEvaluation(string $plainToken): array
         }
     }
 
+    private function lecturerBelongsToDepartment(int $lecturerId, int $departmentId): bool
+    {
+        try {
+            $response = Http::timeout(5)->get(
+                config('services.auth_service.url') . "/api/departments/{$departmentId}/lecturers"
+            );
+
+            return $response->successful()
+                && collect($response->json('lecturers', []))
+                    ->contains(fn($lecturer) => (int) ($lecturer['id'] ?? 0) === $lecturerId);
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
     // ── Get results for a specific lecturer only ───────────────────
 public function lecturerResults(Request $request): JsonResponse
 {
+    $validator = Validator::make($request->all(), [
+        'department_id' => ['nullable', 'integer', 'min:1'],
+        'lecturer_id' => ['required', 'integer', 'min:1'],
+        'window_id' => ['required', 'integer', 'exists:evaluation_windows,id'],
+    ]);
+    if ($validator->fails()) {
+        return response()->json(['success' => false, 'errors' => $validator->errors()], 422);
+    }
+
     $departmentId = $request->query('department_id');
     $lecturerId   = $request->query('lecturer_id');
     $windowId     = $request->query('window_id');
@@ -346,75 +406,72 @@ public function lecturerResults(Request $request): JsonResponse
         ]);
     }
 
-    //  Get all course codes that this specific lecturer taught
-    // by looking at what students actually submitted evaluations for
-    $lecturerCourseCodes = CourseEvaluation::where('lecturer_id', $lecturerId)
-        ->where('window_id', $windowId)
-        ->when($departmentId, fn($q) => $q->where('department_id', $departmentId))
-        ->pluck('course_code')
-        ->unique()
-        ->values()
-        ->toArray();
-
-    if (empty($lecturerCourseCodes)) {
-        return response()->json([
-            'success'   => true,
-            'analytics' => [],
-        ]);
-    }
-
-    //  Get analytics only for courses taught by this lecturer
-    $analytics = EvaluationAnalytic::whereIn('course_code', $lecturerCourseCodes)
-        ->when($windowId, fn($q) => $q->where('window_id', $windowId))
-        ->when($departmentId, fn($q) => $q->where('department_id', $departmentId))
-        ->where('results_visible', true)
-        ->with('window')
-        ->orderByDesc('avg_overall')
-        ->get();
-
     return response()->json([
         'success'   => true,
-        'analytics' => $analytics->map(function ($a) use ($lecturerId) {
+        'analytics' => $this->groupedResults(
+            $windowId,
+            $departmentId ? (int) $departmentId : null,
+            null,
+            (int) $lecturerId
+        ),
+    ]);
+}
 
-            // Get subject name from this specific lecturer's evaluations
-            $sample = CourseEvaluation::where('course_code', $a->course_code)
-                ->where('window_id', $a->window_id)
-                ->where('department_id', $a->department_id)
-                ->where('lecturer_id', $lecturerId)
-                ->first(['subject_name', 'lecturer_name']);
+private function groupedResults(?int $windowId, ?int $departmentId, ?int $facultyId, ?int $lecturerId)
+{
+    if (!$windowId) {
+        return collect();
+    }
 
-            // Per-lecturer averages for THIS course (not all lecturers)
-            $lecturerEvals = CourseEvaluation::where('course_code', $a->course_code)
-                ->where('window_id', $a->window_id)
-                ->where('department_id', $a->department_id)
-                ->where('lecturer_id', $lecturerId)
-                ->get();
+    $query = CourseEvaluation::query()
+        ->where('window_id', $windowId)
+        ->when($departmentId, fn($q) => $q->where('department_id', $departmentId))
+        ->when($facultyId, fn($q) => $q->where('faculty_id', $facultyId))
+        ->when($lecturerId, fn($q) => $q->where('lecturer_id', $lecturerId));
 
-            $count = $lecturerEvals->count();
+    $groups = $query->get()->groupBy(
+        fn(CourseEvaluation $evaluation) => implode('|', [
+            $evaluation->course_code,
+            $evaluation->lecturer_id,
+            $evaluation->department_id,
+        ])
+    );
 
-            // Compute averages specific to this lecturer
-            $avgTeaching    = $count ? round($lecturerEvals->avg('teaching_quality'), 2) : 0;
-            $avgContent     = $count ? round($lecturerEvals->avg('course_content'), 2) : 0;
-            $avgAssessment  = $count ? round($lecturerEvals->avg('assessment_fairness'), 2) : 0;
-            $avgResources   = $count ? round($lecturerEvals->avg('resources_available'), 2) : 0;
-            $avgAccessibility = $count ? round($lecturerEvals->avg('lecturer_accessibility'), 2) : 0;
-            $avgOverall     = $count ? round($lecturerEvals->avg('overall_rating'), 2) : 0;
+    $window = EvaluationWindow::find($windowId);
+    $deptAverages = CourseEvaluation::where('window_id', $windowId)
+        ->get()
+        ->groupBy('department_id')
+        ->map(fn($items) => round($items->avg('overall_rating'), 2));
+    $facultyAverages = CourseEvaluation::where('window_id', $windowId)
+        ->get()
+        ->groupBy('faculty_id')
+        ->map(fn($items) => round($items->avg('overall_rating'), 2));
+
+    return $groups
+        ->filter(fn($items) => $items->count() >= 5)
+        ->map(function ($items) use ($window, $deptAverages, $facultyAverages) {
+            $sample = $items->first();
 
             return [
-                'course_code'             => $a->course_code,
-                'subject_name'            => $sample?->subject_name,
-                'lecturer_name'           => $sample?->lecturer_name,
-                'window'                  => $a->window?->title,
-                'total_responses'         => $count,
-                'avg_teaching_quality'    => $avgTeaching,
-                'avg_course_content'      => $avgContent,
-                'avg_assessment_fairness' => $avgAssessment,
-                'avg_resources'           => $avgResources,
-                'avg_accessibility'       => $avgAccessibility,
-                'avg_overall'             => $avgOverall,
-                'dept_avg_overall'        => round($a->dept_avg_overall, 2),
+                'course_code' => $sample->course_code,
+                'subject_name' => $sample->subject_name,
+                'lecturer_id' => $sample->lecturer_id,
+                'lecturer_name' => $sample->lecturer_name,
+                'department_id' => $sample->department_id,
+                'faculty_id' => $sample->faculty_id,
+                'window' => $window?->title,
+                'total_responses' => $items->count(),
+                'avg_teaching_quality' => round($items->avg('teaching_quality'), 2),
+                'avg_course_content' => round($items->avg('course_content'), 2),
+                'avg_assessment_fairness' => round($items->avg('assessment_fairness'), 2),
+                'avg_resources' => round($items->avg('resources_available'), 2),
+                'avg_accessibility' => round($items->avg('lecturer_accessibility'), 2),
+                'avg_overall' => round($items->avg('overall_rating'), 2),
+                'dept_avg_overall' => $deptAverages[$sample->department_id] ?? 0,
+                'faculty_avg_overall' => $facultyAverages[$sample->faculty_id] ?? 0,
             ];
-        })->filter(fn($a) => $a['total_responses'] >= 5)->values(), // ✅ enforce threshold per lecturer
-    ]);
+        })
+        ->sortByDesc('avg_overall')
+        ->values();
 }
 }

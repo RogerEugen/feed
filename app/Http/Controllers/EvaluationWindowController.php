@@ -35,27 +35,10 @@ class EvaluationWindowController extends Controller
         ]);
 
         if (!$window) {
-            // Also check if there's an active window regardless of time
-            // (admin may set is_active=true without time constraints)
-            $windowAnyTime = EvaluationWindow::where('is_active', true)->first();
-
-            Log::info('Fallback window check', [
-                'found' => $windowAnyTime ? $windowAnyTime->id : null,
-            ]);
-
-            if (!$windowAnyTime) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'No evaluation window is currently open.',
-                ], 404);
-            }
-
-            // Return it if is_active is true even if time hasn't opened yet
-            // Admin explicitly activated it
             return response()->json([
-                'success' => true,
-                'window'  => $this->formatWindow($windowAnyTime),
-            ]);
+                'success' => false,
+                'message' => 'No evaluation window is currently open.',
+            ], 404);
         }
 
         return response()->json([
@@ -114,6 +97,12 @@ class EvaluationWindowController extends Controller
         $window = EvaluationWindow::findOrFail($id);
 
         if (!$window->is_active) {
+            if ($window->closes_at->isPast()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'A closed evaluation window cannot be activated again.',
+                ], 422);
+            }
             // Activating this one — deactivate all others
             EvaluationWindow::where('is_active', true)
                 ->where('id', '!=', $id)
